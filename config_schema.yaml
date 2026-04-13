@@ -1,0 +1,11 @@
+threshold:
+  type: integer
+  description: "举报人数阈值（达到该人数后自动踢出）"
+  default: 2
+  min: 1
+  max: 10
+
+reportKeyword:
+  type: string
+  description: "举报触发关键词"
+  default: "有内鬼"
