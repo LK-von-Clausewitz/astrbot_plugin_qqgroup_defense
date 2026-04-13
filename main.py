@@ -4,8 +4,8 @@ from typing import Dict, Set
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
-# 移除未使用的导入
-# from astrbot.api.message_components import At, Plain
+# 【修复1】：恢复对 At 组件的导入，AstrBot 必须通过类来判断组件类型
+from astrbot.api.message_components import At, Plain
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 
@@ -18,10 +18,6 @@ class GroupDefensePlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         """
         初始化插件
-
-        Args:
-            context: AstrBot 上下文对象，用于与核心交互
-            config: 插件配置字典，包含 threshold 和 reportKeyword
         """
         super().__init__(context)
         self.config = config or {}
@@ -38,33 +34,31 @@ class GroupDefensePlugin(Star):
     def _extract_target_from_message(self, event: AstrMessageEvent) -> str | None:
         """
         从消息中提取被举报的目标用户 ID
-
-        支持两种格式：
-        1. @提及用户：通过消息链中的 At 组件提取
-        2. 纯文本格式："有内鬼 123456789"
-
-        Args:
-            event: 消息事件对象
-
-        Returns:
-            目标用户 ID 字符串，解析失败返回 None
         """
         # 方式1：从消息链中提取 @提及 的用户
         message_chain = event.message_obj.message
         if message_chain:
             for comp in message_chain:
-                # 兼容不同版本的 At 组件结构
-                if comp.type == "at":
-                    target_id = getattr(comp, "qq", None)
+                # 【修复2】：使用 isinstance(comp, At) 来准确判断是否为 At 组件
+                if isinstance(comp, At):
+                    target_id = comp.qq
                     if target_id:
                         return str(target_id)
 
-        # 方式2：纯文本格式 "有内鬼 123456789"
+        # 方式2：正则匹配纯文本提取
         message_str = event.message_str.strip()
+        
+        # 兼容纯文本格式 "有内鬼 123456789"
         pattern = rf"{re.escape(self.report_keyword)}\s+(\d+)"
         match = re.search(pattern, message_str)
         if match:
             return match.group(1)
+            
+        # 【修复3】：兼容从 message_str 提取底层的 "[At:QQ号]" 结构兜底
+        pattern_at = r"\[At:(\d+)\]"
+        match_at = re.search(pattern_at, message_str)
+        if match_at:
+            return match_at.group(1)
 
         return None
 
@@ -133,13 +127,11 @@ class GroupDefensePlugin(Star):
         self.reports.clear()
         yield event.plain_result("✅ 已清空所有举报记录。")
 
-    # 修正1：使用 event_message_type 监听所有消息，替代已弃用的 on_message
     @filter.event_message_type(EventMessageType.ALL)
     async def handle_message(self, event: AstrMessageEvent):
         """
         监听群消息，处理举报指令
         """
-        # 修正2：直接从 event.message_obj 获取所需信息
         message_obj = event.message_obj
         group_id = message_obj.group_id
         sender_id = message_obj.sender.user_id
@@ -157,7 +149,7 @@ class GroupDefensePlugin(Star):
         target_id = self._extract_target_from_message(event)
         if not target_id:
             yield event.plain_result(
-                f"❌ 请使用正确格式：{self.report_keyword} @用户"
+                f"❌ 请使用正确格式：{self.report_keyword} @用户 或 {self.report_keyword} QQ号"
             )
             return
 
@@ -187,7 +179,7 @@ class GroupDefensePlugin(Star):
 
         # 发送举报进度提示
         yield event.plain_result(
-            f"📢 用户 {sender_id} 举报了 {target_id}。当前举报人数：{current_count}"
+            f"📢 用户 {sender_id} 举报了 {target_id}。当前举报人数：{current_count}/{self.threshold}"
         )
 
         # 判断是否达到阈值
