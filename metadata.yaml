@@ -1,9 +1,9 @@
 name: astrbot_plugin_group_defense
 display_name: QQ 群防御插件
 description: 群员通过固定格式举报内鬼，达到阈值后自动踢人
-author: your_name
+author: LK-von-Clausewitz
 version: 1.0.0
-repo: https://github.com/yourusername/astrbot_plugin_group_defense
+repo: https://github.com/LK-von-Clausewitz/astrbot_plugin_qqgroup_defense
 support_platforms:
   - aiocqhttp
 astrbot_version: ">=4.16,<5"
