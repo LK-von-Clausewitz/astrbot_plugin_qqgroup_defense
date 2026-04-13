@@ -1,0 +1,14 @@
+{
+  "threshold": {
+    "description": "举报人数阈值",
+    "type": "int",
+    "default": 2,
+    "hint": "达到该人数后，机器人会自动踢出被举报用户"
+  },
+  "reportKeyword": {
+    "description": "举报触发关键词",
+    "type": "string",
+    "default": "有内鬼",
+    "hint": "用户发送此关键词开头并@某人的消息即视为举报"
+  }
+}
