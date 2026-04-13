@@ -4,7 +4,9 @@ from typing import Dict, Set
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
-from astrbot.api.message_components import At, Plain
+# 移除未使用的导入
+# from astrbot.api.message_components import At, Plain
+from astrbot.core.star.filter.event_message_type import EventMessageType
 
 
 class GroupDefensePlugin(Star):
@@ -47,19 +49,13 @@ class GroupDefensePlugin(Star):
         Returns:
             目标用户 ID 字符串，解析失败返回 None
         """
-        message_obj = event.message_obj
-        if not message_obj:
-            return None
-
         # 方式1：从消息链中提取 @提及 的用户
-        message_chain = message_obj.message
+        message_chain = event.message_obj.message
         if message_chain:
-            for component in message_chain:
-                if hasattr(component, 'qq') or (
-                    hasattr(component, 'type') and component.type == 'at'
-                ):
-                    # 兼容不同版本的 At 组件结构
-                    target_id = getattr(component, 'qq', None)
+            for comp in message_chain:
+                # 兼容不同版本的 At 组件结构
+                if comp.type == "at":
+                    target_id = getattr(comp, "qq", None)
                     if target_id:
                         return str(target_id)
 
@@ -77,16 +73,6 @@ class GroupDefensePlugin(Star):
     ) -> bool:
         """
         调用平台 API 踢出群成员
-
-        通过 AstrBot 的 platform 对象调用 OneBot v11 标准的 set_group_kick Action
-
-        Args:
-            group_id: 群组 ID
-            user_id: 要踢出的用户 ID
-            reason: 踢出原因
-
-        Returns:
-            是否踢出成功
         """
         try:
             platform = self.context.get_platform()
@@ -95,14 +81,13 @@ class GroupDefensePlugin(Star):
                 return False
 
             # 调用 OneBot v11 标准的 set_group_kick Action
-            result = await platform.send(
-                {
-                    "type": "set_group_kick",
-                    "group_id": int(group_id),
-                    "user_id": int(user_id),
-                    "reject_add_request": False,
-                }
-            )
+            payload = {
+                "type": "set_group_kick",
+                "group_id": int(group_id),
+                "user_id": int(user_id),
+                "reject_add_request": False,
+            }
+            result = await platform.send(payload)
 
             if result and result.get("status") == "ok":
                 logger.info(f"[群防御] 成功踢出用户 {user_id}，原因：{reason}")
@@ -110,7 +95,6 @@ class GroupDefensePlugin(Star):
             else:
                 logger.warning(f"[群防御] 踢出用户 {user_id} 失败: {result}")
                 return False
-
         except Exception as e:
             logger.error(f"[群防御] 踢出用户时发生异常: {e}")
             return False
@@ -124,25 +108,18 @@ class GroupDefensePlugin(Star):
     async def show_status(self, event: AstrMessageEvent):
         """
         查看当前举报统计
-
-        用法：/defense status
         """
         group_id = event.message_obj.group_id
         if not group_id:
             yield event.plain_result("该指令仅支持在群聊中使用。")
             return
 
-        group_reports = {
-            target: reporters
-            for target, reporters in self.reports.items()
-        }
-
-        if not group_reports:
+        if not self.reports:
             yield event.plain_result("📊 当前没有举报记录。")
             return
 
         lines = ["📊 当前举报统计："]
-        for target, reporters in group_reports.items():
+        for target, reporters in self.reports.items():
             lines.append(f"• 目标 {target}: {len(reporters)} 人举报")
         yield event.plain_result("\n".join(lines))
 
@@ -150,43 +127,35 @@ class GroupDefensePlugin(Star):
     async def clear_reports(self, event: AstrMessageEvent):
         """
         清空所有举报记录（仅管理员可用）
-
-        用法：/defense clear
         """
         sender_id = event.message_obj.sender.user_id
-
-        # 简单权限检查：可以根据实际需求扩展
-        # TODO: 接入 AstrBot 的权限系统
         logger.info(f"[群防御] 用户 {sender_id} 尝试清空举报记录")
-
         self.reports.clear()
         yield event.plain_result("✅ 已清空所有举报记录。")
 
-    @filter.on_message()
+    # 修正1：使用 event_message_type 监听所有消息，替代已弃用的 on_message
+    @filter.event_message_type(EventMessageType.ALL)
     async def handle_message(self, event: AstrMessageEvent):
         """
         监听群消息，处理举报指令
         """
-        message_str = event.message_obj.message_str
+        # 修正2：直接从 event.message_obj 获取所需信息
+        message_obj = event.message_obj
+        group_id = message_obj.group_id
+        sender_id = message_obj.sender.user_id
+        message_str = event.message_str
+
+        # 检查是否为群聊消息
+        if not group_id:
+            return
 
         # 检查是否以举报关键词开头
         if not message_str.strip().startswith(self.report_keyword):
             return
 
-        # 获取消息基本信息
-        message_obj = event.message_obj
-        group_id = message_obj.group_id
-        sender_id = message_obj.sender.user_id
-
-        # 仅处理群聊消息
-        if not group_id:
-            logger.debug("[群防御] 忽略非群聊消息")
-            return
-
         # 提取被举报的目标用户 ID
         target_id = self._extract_target_from_message(event)
         if not target_id:
-            # 解析失败，提示正确格式
             yield event.plain_result(
                 f"❌ 请使用正确格式：{self.report_keyword} @用户"
             )
