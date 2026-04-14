@@ -9,11 +9,6 @@ from astrbot.core.star.filter.event_message_type import EventMessageType
 
 
 class GroupDefensePlugin(Star):
-    """
-    QQ 群防御插件
-    最终修正版：调整逻辑优先级（自保优先）
-    """
-
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
@@ -23,81 +18,86 @@ class GroupDefensePlugin(Star):
         logger.info(f"[群防御] 插件加载：阈值={self.threshold}，关键词='{self.report_keyword}'")
 
     def _extract_target_from_message(self, event: AstrMessageEvent) -> str | None:
-        """顺序解析举报目标"""
+        """顺序解析：确保先识别关键词，再识别其后的@"""
         message_chain = event.message_obj.message
         if not message_chain: return None
+        
         keyword_seen = False
         for comp in message_chain:
+            # 1. 找文本组件里的关键词
             if isinstance(comp, Plain):
                 if self.report_keyword in comp.text:
                     keyword_seen = True
+                    # 尝试提取关键词后的数字
                     after_text = comp.text[comp.text.find(self.report_keyword) + len(self.report_keyword):]
                     match_num = re.search(r"^\s*(\d+)", after_text)
-                    if match_num: return match_num.group(1)
+                    if match_num: return str(match_num.group(1))
+            
+            # 2. 只有关键词出现后，碰到的第一个@才算目标
             elif isinstance(comp, At):
-                if keyword_seen: return str(comp.qq)
+                if keyword_seen:
+                    return str(comp.qq)
         return None
-
-    async def _kick_group_member(self, event: AstrMessageEvent, group_id: str, user_id: str) -> bool:
-        """调用踢人 API"""
-        try:
-            if hasattr(event, "bot") and hasattr(event.bot, "call_action"):
-                await event.bot.call_action("set_group_kick", group_id=int(group_id), user_id=int(user_id), reject_add_request=False)
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"[群防御] 踢人失败: {e}")
-            return False
 
     @filter.event_message_type(EventMessageType.ALL)
     async def handle_message(self, event: AstrMessageEvent):
         message_obj = event.message_obj
-        group_id = message_obj.group_id
-        sender_id = str(message_obj.sender.user_id)
+        if not message_obj.group_id: return
         
-        # 1. 动态获取机器人 ID
-        self_id = None
-        if hasattr(event, "bot") and hasattr(event.bot, "self_id"):
-            self_id = str(event.bot.self_id)
-        elif hasattr(message_obj, "self_id"):
-            self_id = str(message_obj.self_id)
-
-        if not group_id or not event.message_str.strip().startswith(self.report_keyword):
+        # 严格校验：必须以关键词开头，否则不处理（防止误触其他对话）
+        if not event.message_str.strip().startswith(self.report_keyword):
             return
 
-        # 2. 提取目标
+        # --- 重点：全路径获取机器人 ID ---
+        self_id = None
+        try:
+            # 路径A: event.bot 对象
+            if hasattr(event, "bot") and hasattr(event.bot, "self_id"):
+                self_id = str(event.bot.self_id)
+            # 路径B: 消息对象的 self_id
+            elif hasattr(message_obj, "self_id"):
+                self_id = str(message_obj.self_id)
+            # 路径C: 从 context 尝试
+            elif hasattr(self.context, "get_main_bot"):
+                bot = self.context.get_main_bot()
+                if bot: self_id = str(bot.self_id)
+        except:
+            pass
+
+        # 提取目标并统一转为字符串
         target_id = self._extract_target_from_message(event)
+        sender_id = str(message_obj.sender.user_id)
+        
         if not target_id:
             yield event.plain_result(f"❌ 请使用正确格式：{self.report_keyword} @用户")
             return
 
-        # --- 优先级调整开始 ---
+        # --- 核心拦截逻辑：顺序非常重要 ---
 
-        # 优先级 1: 机器人自保（必须放在最前面，防止被管理员逻辑拦截）
-        if self_id and target_id == self_id:
+        # 1. 自保拦截 (即便机器人是管理，也要先触发这句)
+        if self_id and str(target_id) == self_id:
             yield event.plain_result("😅 怎么滴，还想把我也端了？")
             return
             
-        # 优先级 2: 禁止自举
-        if target_id == sender_id:
+        # 2. 自残拦截
+        if str(target_id) == sender_id:
             yield event.plain_result("❌ 为什么要举报你自己？")
             return
 
-        # 优先级 3: 管理员免疫判断
+        # 3. 管理员拦截
         try:
+            # 注意：这里调用 API 可能需要一点时间，放在自检后面能提高响应速度
             target_info = await event.bot.get_group_member_info(
-                group_id=int(group_id), 
+                group_id=int(message_obj.group_id), 
                 user_id=int(target_id)
             )
             if target_info and target_info.get("role") in ["admin", "owner"]:
                 yield event.plain_result("⚠️ 对方是管理员或群主，我踢不动。")
                 return
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"[群防御] 权限检查跳过: {e}")
 
-        # --- 优先级调整结束 ---
-
-        # 计数与踢人逻辑
+        # --- 4. 计数与执行 ---
         if target_id not in self.reports:
             self.reports[target_id] = set()
 
@@ -111,28 +111,19 @@ class GroupDefensePlugin(Star):
         yield event.plain_result(f"📢 收到针对 {target_id} 的举报！\n进度：{current_count}/{self.threshold}")
 
         if current_count >= self.threshold:
-            success = await self._kick_group_member(event, group_id, target_id)
-            if success:
+            # 踢人动作
+            try:
+                await event.bot.call_action(
+                    "set_group_kick",
+                    group_id=int(message_obj.group_id),
+                    user_id=int(target_id),
+                    reject_add_request=False
+                )
                 self.reports.pop(target_id, None)
-                yield event.plain_result(f"🚫 用户 {target_id} 达到举报上限，已被移出群聊。")
-            else:
-                yield event.plain_result(f"❌ 踢出失败。请确认我是否有群管理权限。")
-
-    @filter.command_group("defense")
-    def defense_group(self): pass
-
-    @defense_group.command("status")
-    async def show_status(self, event: AstrMessageEvent):
-        if not self.reports:
-            yield event.plain_result("📊 当前暂无举报记录。")
-            return
-        msg = "📊 举报统计：\n" + "\n".join([f"• {k}: {len(v)}人" for k,v in self.reports.items()])
-        yield event.plain_result(msg)
-
-    @defense_group.command("clear")
-    async def clear_reports(self, event: AstrMessageEvent):
-        self.reports.clear()
-        yield event.plain_result("✅ 举报记录已清空。")
+                yield event.plain_result(f"🚫 用户 {target_id} 达到上限，已被移出。")
+            except Exception as e:
+                logger.error(f"踢人失败: {e}")
+                yield event.plain_result("❌ 踢出失败，可能我不是管理员。")
 
     async def terminate(self):
         self.reports.clear()
