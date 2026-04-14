@@ -11,7 +11,7 @@ from astrbot.core.star.filter.event_message_type import EventMessageType
 class GroupDefensePlugin(Star):
     """
     QQ 群防御插件
-    增强版：包含管理员免疫、机器人自保、顺序解析及接口修复
+    增强修复版：修正了 bot_id 获取失败的问题
     """
 
     def __init__(self, context: Context, config: dict = None):
@@ -38,22 +38,17 @@ class GroupDefensePlugin(Star):
         keyword_seen = False
         
         for comp in message_chain:
-            # 1. 检测关键词
             if isinstance(comp, Plain):
                 if self.report_keyword in comp.text:
                     keyword_seen = True
-                    # 检查紧跟关键词后的数字 ID (例如: 有内鬼 12345)
                     after_text = comp.text[comp.text.find(self.report_keyword) + len(self.report_keyword):]
                     match_num = re.search(r"^\s*(\d+)", after_text)
                     if match_num:
                         return match_num.group(1)
-            
-            # 2. 只有在关键词之后出现的 @ 才是有效的举报目标
             elif isinstance(comp, At):
                 if keyword_seen:
                     return str(comp.qq)
         
-        # 3. 兜底正则匹配 (兼容某些特殊序列化情况)
         message_raw = event.message_str.strip()
         k_idx = message_raw.find(self.report_keyword)
         if k_idx != -1:
@@ -61,17 +56,13 @@ class GroupDefensePlugin(Star):
             match_at = re.search(r"\[At:(\d+)\]", after_keyword)
             if match_at:
                 return match_at.group(1)
-
         return None
 
     async def _kick_group_member(
-        self, event: AstrMessageEvent, group_id: str, user_id: str, reason: str = "多人举报"
+        self, event: AstrMessageEvent, group_id: str, user_id: str
     ) -> bool:
-        """
-        调用 API 踢出群成员 (兼容 Napcat/OneBot)
-        """
+        """调用 API 踢出群成员"""
         try:
-            # 优先使用底层 call_action，这是最直接有效的方式
             if hasattr(event, "bot") and hasattr(event.bot, "call_action"):
                 await event.bot.call_action(
                     "set_group_kick",
@@ -80,57 +71,44 @@ class GroupDefensePlugin(Star):
                     reject_add_request=False
                 )
                 return True
-                
-            # 备选：通过 platform 发送
-            platform_name = event.get_platform_name()
-            platform = self.context.get_platform(platform_name)
-            if platform and hasattr(platform, "send"):
-                payload = {
-                    "type": "set_group_kick",
-                    "group_id": int(group_id),
-                    "user_id": int(user_id),
-                    "reject_add_request": False,
-                }
-                result = await platform.send(payload)
-                return result and result.get("status") == "ok"
-                
             return False
         except Exception as e:
-            logger.error(f"[群防御] 踢人接口调用失败: {e}")
+            logger.error(f"[群防御] 踢人接口报错: {e}")
             return False
 
     @filter.event_message_type(EventMessageType.ALL)
     async def handle_message(self, event: AstrMessageEvent):
-        """
-        监听并处理举报逻辑
-        """
         message_obj = event.message_obj
         group_id = message_obj.group_id
         sender_id = message_obj.sender.user_id
-        self_id = event.bot_id # 获取机器人自身QQ
+        
+        # --- 修复：更健壮的机器人 ID 获取方式 ---
+        self_id = None
+        if hasattr(event, "bot") and hasattr(event.bot, "self_id"):
+            self_id = str(event.bot.self_id)
+        elif hasattr(message_obj, "self_id"):
+            self_id = str(message_obj.self_id)
+        # ---------------------------------------
 
         if not group_id: return
         if not event.message_str.strip().startswith(self.report_keyword): return
 
-        # 1. 提取目标 ID
         target_id = self._extract_target_from_message(event)
         if not target_id:
             yield event.plain_result(f"❌ 请使用正确格式：{self.report_keyword} @用户")
             return
 
-        # 2. 逻辑保护：机器人自保
-        if target_id == self_id:
+        # 逻辑保护
+        if self_id and target_id == self_id:
             yield event.plain_result("😅 怎么滴，还想把我也端了？")
             return
             
-        # 3. 逻辑保护：防止自残
         if target_id == sender_id:
             yield event.plain_result("❌ 为什么要举报你自己？")
             return
 
-        # 4. 逻辑保护：管理员/群主免疫
+        # 管理员免疫判断
         try:
-            # 调用 OneBot API 获取目标成员信息
             target_info = await event.bot.get_group_member_info(
                 group_id=int(group_id), 
                 user_id=int(target_id)
@@ -138,10 +116,10 @@ class GroupDefensePlugin(Star):
             if target_info and target_info.get("role") in ["admin", "owner"]:
                 yield event.plain_result("⚠️ 对方是管理员或群主，我踢不动。")
                 return
-        except Exception as e:
-            logger.debug(f"无法获取目标权限信息（可能非管理）: {e}")
+        except:
+            pass
 
-        # --- 5. 计数逻辑 ---
+        # 计数逻辑
         if target_id not in self.reports:
             self.reports[target_id] = set()
 
@@ -157,10 +135,8 @@ class GroupDefensePlugin(Star):
             f"📢 收到针对 {target_id} 的举报！\n进度：{current_count}/{self.threshold}"
         )
 
-        # --- 6. 触发踢人 ---
         if current_count >= self.threshold:
             success = await self._kick_group_member(event, group_id, target_id)
-
             if success:
                 self.reports.pop(target_id, None)
                 yield event.plain_result(f"🚫 用户 {target_id} 达到举报上限，已被移出群聊。")
