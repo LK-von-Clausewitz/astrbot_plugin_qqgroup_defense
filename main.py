@@ -15,9 +15,10 @@ class GroupDefensePlugin(Star):
         self.threshold = self.config.get("threshold", 2)
         self.report_keyword = self.config.get("reportKeyword", "有内鬼")
         self.reports: Dict[str, Set[str]] = {}
-        logger.info(f"[群防御] 插件加载成功。")
+        logger.info(f"[群防御] 插件加载：阈值={self.threshold}")
 
     def _extract_target_from_message(self, event: AstrMessageEvent) -> str | None:
+        """顺序解析举报目标"""
         message_chain = event.message_obj.message
         if not message_chain: return None
         keyword_seen = False
@@ -36,26 +37,11 @@ class GroupDefensePlugin(Star):
     async def handle_message(self, event: AstrMessageEvent):
         message_obj = event.message_obj
         if not message_obj.group_id: return
-        if not event.message_str.strip().startswith(self.report_keyword): return
+        
+        # 严格开头匹配
+        if not event.message_str.strip().startswith(self.report_keyword):
+            return
 
-        # --- 1. 尝试所有可能路径获取机器人自己的 QQ 号 ---
-        self_id = ""
-        try:
-            if hasattr(event, "bot_id") and event.bot_id:
-                self_id = str(event.bot_id)
-            elif hasattr(event, "bot") and hasattr(event.bot, "self_id"):
-                self_id = str(event.bot.self_id)
-            elif hasattr(message_obj, "self_id"):
-                self_id = str(message_obj.self_id)
-            
-            # 如果还是空，尝试从 context 获取（最后的兜底）
-            if not self_id:
-                # 注意：有些版本的 AstrBot 无法简单获取 self_id，这里记录一下
-                logger.warning("[群防御] 无法自动获取机器人ID，自保逻辑可能失效")
-        except:
-            pass
-
-        # 2. 提取被举报人 ID 和 举报人 ID
         target_id = self._extract_target_from_message(event)
         sender_id = str(message_obj.sender.user_id).strip()
         
@@ -63,36 +49,27 @@ class GroupDefensePlugin(Star):
             yield event.plain_result(f"❌ 请使用正确格式：{self.report_keyword} @用户")
             return
 
-        target_id = str(target_id).strip() # 再次强制去空格
-        self_id = str(self_id).strip() if self_id else ""
+        target_id = str(target_id).strip()
 
-        # --- 3. 核心优先级：自保 > 自残 > 管理员 ---
-
-        # A. 自保：只要 target_id 等于机器人 ID，直接回绝，不再往下走
-        if self_id and target_id == self_id:
-            yield event.plain_result("😅 怎么滴，还想把我也端了？")
-            return
-
-        # B. 自残：不能自己报自己
+        # 1. 自残拦截：防止自己举报自己
         if target_id == sender_id:
             yield event.plain_result("❌ 为什么要举报你自己？")
             return
 
-        # C. 管理员拦截
+        # 2. 管理员/群主/机器人自身 免疫
+        # 只要机器人自己是管理，举报机器人就会命中这一条
         try:
             target_info = await event.bot.get_group_member_info(
                 group_id=int(message_obj.group_id), 
                 user_id=int(target_id)
             )
-            # 如果是管理员或群主，拦截
             if target_info and target_info.get("role") in ["admin", "owner"]:
-                yield event.plain_result("⚠️ 对方是管理员或群主，我踢不动。")
+                yield event.plain_result("⚠️ 对方是管理人员，无法触发举报机制。")
                 return
         except Exception as e:
-            # 这里的报错通常是因为 target_id 根本不在群里或者是机器人自己
-            logger.debug(f"检查权限异常: {e}")
+            logger.debug(f"[群防御] 权限检查异常: {e}")
 
-        # --- 4. 正常的计数逻辑 ---
+        # 3. 计数逻辑
         if target_id not in self.reports:
             self.reports[target_id] = set()
 
@@ -105,17 +82,21 @@ class GroupDefensePlugin(Star):
         current_count = len(reporters)
         yield event.plain_result(f"📢 收到举报！目标：{target_id}\n进度：{current_count}/{self.threshold}")
 
+        # 4. 触发踢人
         if current_count >= self.threshold:
             try:
+                # 使用 NapCat/OneBot 标准 API
                 await event.bot.call_action(
                     "set_group_kick",
                     group_id=int(message_obj.group_id),
-                    user_id=int(target_id)
+                    user_id=int(target_id),
+                    reject_add_request=False
                 )
                 self.reports.pop(target_id, None)
-                yield event.plain_result(f"🚫 用户 {target_id} 举报达标，已移出。")
-            except:
-                yield event.plain_result("❌ 踢出失败，可能我没有管理员权限。")
+                yield event.plain_result(f"🚫 用户 {target_id} 举报达标，已被移出群聊。")
+            except Exception as e:
+                logger.error(f"[群防御] 执行踢人失败: {e}")
+                yield event.plain_result("❌ 踢出失败，请确认我是否有管理员权限。")
 
     async def terminate(self):
         self.reports.clear()
