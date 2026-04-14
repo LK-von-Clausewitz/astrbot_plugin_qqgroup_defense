@@ -1,85 +1,53 @@
-## 📋 QQ 群防御插件需求文档（版本1.0）
+# AstrBot 群举报防御插件 (Group Defense)
 
-### 🎯 背景
-- QQ 游戏群经常遇到恶意用户进群后私聊群员，造成骚扰。  
-- 管理员人工审核难以识别潜伏者，需要自动化处理机制。  
+一款专为 AstrBot 设计的群聊自动化管理插件。通过识别关键词并累计举报人数，实现多人协作一键踢出违规用户。特别针对 **NapCat/OneBot** 协议进行了底层优化，确保踢人动作执行的高成功率。
 
-### 🛠️ 核心功能
-1. **举报机制**
-   - 群员通过固定格式消息举报：  
-     ```
-     有内鬼 @某人
-     ```
-   - 插件监听群消息，解析目标用户 ID。
+## 🌟 核心功能
 
-2. **举报计数**
-   - 每个目标用户维护一个举报集合（存储举报者 ID）。  
-   - 同一个人不能重复举报同一个目标。  
+* **关键词触发**：监听群聊消息，通过自定义关键词（如“有内鬼”）启动举报流程。
+* **多人协作**：只有当举报人数达到设定阈值时，才会执行踢人动作，防止误伤。
+* **管理员免疫**：自动检测被举报人身份，群主、管理员及机器人自身受保护，无法被举报踢出。
+* **智能 ID 识别**：支持直接 `@用户` 举报，也支持在关键词后跟 `QQ号` 进行举报。
+* **权限自检**：在执行踢人前自动检测机器人权限，若非管理员会给出明确反馈。
+* **自残保护**：禁止用户举报自己。
 
-3. **阈值判断**
-   - 当某个用户被举报人数 ≥ 阈值（默认 2 人，可配置），机器人立即踢出该用户。  
+## 🚀 安装与配置
 
-4. **提示与透明化**
-   - 每次举报都会在群里提示：  
-     ```
-     用户 @举报者 举报了 @目标。当前举报人数：X
-     ```
-   - 达到阈值后提示：  
-     ```
-     用户 @目标 因被多人举报，已被移出群聊。
-     ```
+### 1. 安装
+将插件代码放入 AstrBot 的插件目录 `data/plugins/astrbot_plugin_group_defense/`。
 
----
+### 2. 配置文件 (`config.yaml`)
+您可以在插件配置中修改以下参数：
 
-### ⚙️ 插件配置参数
-- `threshold`: 举报人数阈值（默认 2）。  
-- `reportKeyword`: 举报触发关键词（默认“有内鬼”）。  
-
----
-
-### 📝 插件逻辑伪代码
-```ts
-const reports = new Map<string, Set<string>>();
-
-function handleReport(bot, groupId, reporterId, targetId) {
-  if (!reports.has(targetId)) {
-    reports.set(targetId, new Set());
-  }
-  const reporters = reports.get(targetId)!;
-
-  if (reporters.has(reporterId)) {
-    bot.sendGroupMsg(groupId, `[举报系统] 你已经举报过该用户。`);
-    return;
-  }
-
-  reporters.add(reporterId);
-  bot.sendGroupMsg(groupId, `[举报系统] 用户 ${reporterId} 举报了 ${targetId}。当前举报人数：${reporters.size}`);
-
-  const threshold = 2; // 可配置
-  if (reporters.size >= threshold) {
-    bot.kickGroupMember(groupId, targetId, "多人举报");
-    bot.sendGroupMsg(groupId, `[举报系统] 用户 ${targetId} 因被多人举报，已被移出群聊。`);
-    reports.delete(targetId);
-  }
-}
-
-bot.on("group_message", (event) => {
-  const msg = event.message.trim();
-  if (msg.startsWith("有内鬼")) {
-    const targetId = msg.split(" ")[1]; // 简单解析 @某人
-    handleReport(bot, event.group_id, event.user_id, targetId);
-  }
-});
+```yaml
+threshold: 2          # 触发踢人的举报人数阈值
+reportKeyword: "有内鬼" # 触发举报的关键词
 ```
 
+## 📖 使用说明
+
+### 举报成员
+在群聊中发送：
+* `有内鬼 @某人`
+* `有内鬼 12345678`（直接接 QQ 号）
+
+### 管理员命令
+插件提供了一些内置指令用于管理举报进度：
+* `/defense status`：查看当前群内所有被举报人的进度统计。
+* `/defense clear`：手动清空所有举报记录。
+
+## 🛠️ 技术特性
+
+* **底层 API 支撑**：弃用了不稳定的平台通用发送接口，直接调用 `set_group_kick` 标准 Action，与 NapCat 深度兼容。
+* **顺序解析逻辑**：针对引用消息（Reply）进行了特殊优化，只有在关键词之后的 `@` 才会判定为目标，有效规避了误触发。
+* **零存储依赖**：举报记录随内存运行，不产生垃圾文件，支持在机器人关闭时自动清空。
+
+## ⚠️ 注意事项
+
+1.  **权限要求**：机器人账号必须拥有该群的 **管理员** 或 **群主** 权限，否则无法执行踢人动作。
+2.  **环境要求**：建议搭配 NapCat、Lagrange 等支持 OneBot V11 协议的适配器使用。
+
 ---
 
-### ✅ 总结
-- **输入**：群员发送“有内鬼 @某人”。  
-- **处理**：机器人记录举报，达到阈值后直接踢人。  
-- **输出**：群内提示举报进度与踢人结果。  
-- **可配置**：举报阈值、关键词。  
-
-
-
-要不要我再帮你写一个 **README.md 模板**，让你可以直接放到 GitHub 仓库里？
+### 开源许可
+MIT License
